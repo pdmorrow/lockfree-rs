@@ -12,6 +12,12 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 name = "spinlock"
 harness = false
 
+# Not a criterion target: a fixed-window measurement that prints a
+# table. See its module docs for why fairness cannot be a benchmark.
+[[bench]]
+name = "fairness"
+harness = false
+
 # Benchmarks are only meaningful with optimisations on; `cargo bench`
 # uses this profile.
 [profile.bench]

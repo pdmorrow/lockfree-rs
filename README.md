@@ -136,6 +136,7 @@ cargo bench                              # the whole suite
 cargo bench -- uncontended               # filter by name
 cargo bench -- --save-baseline main      # record a baseline
 cargo bench -- --baseline main           # compare against it
+cargo bench --bench fairness             # just the fairness table
 ```
 
 Benchmarks use [criterion](https://docs.rs/criterion), which runs each
@@ -146,7 +147,7 @@ only trustworthy way to evaluate a change to a lock — the run-to-run
 noise on a contended benchmark easily exceeds the effect you are
 looking for.
 
-[`benches/spinlock.rs`](benches/spinlock.rs) measures three things,
+[`benches/spinlock.rs`](benches/spinlock.rs) measures four things,
 each against `std::sync::Mutex` for scale:
 
 * **`uncontended`** — lock, mutate, unlock on one thread with nobody
@@ -158,11 +159,24 @@ each against `std::sync::Mutex` for scale:
   separately, because they are genuinely different (the failure path
   is rejected by the compare-exchange without acquiring anything) and
   averaging them would hide both.
-* **`contended`** — throughput as threads are added, 1, 2, 4, … up to
-  `available_parallelism`. Threads are spawned and parked on a barrier
-  before the clock starts, so thread creation stays out of the
-  measurement and what is left is the handoff. Reported as elements
-  per second, where an element is one critical section.
+* **`contended`** — throughput as threads are added, 2, 4, … up to
+  `available_parallelism`, with nothing between one release and the
+  next acquire. Threads are spawned and parked on a barrier before the
+  clock starts, so thread creation stays out of the measurement. It
+  starts at two because one thread contending with nobody is the
+  `uncontended` case again, wrapped in a barrier that adds overhead
+  and no information.
+* **`work_ratio`** — threads pinned at `available_parallelism`, and
+  the *non-critical* work swept instead. This is the axis the other
+  three hold fixed at zero, and it turns out to be the one that
+  decides the answer.
+
+[`benches/fairness.rs`](benches/fairness.rs) is a fifth measurement
+and not a criterion benchmark, because it has no time to report: it
+runs a fixed wall-clock window and counts. The payload under the lock
+records which thread held it last, so the number of *handoffs* —
+acquisitions that actually changed hands — is observable from inside
+the critical section where it cannot be raced.
 
 Illustrative output, from an AMD Ryzen 5 5600U (12 hardware
 threads); treat the shape as the result, not the digits, since they
@@ -170,28 +184,93 @@ move with the machine:
 
 | Case | `Spinlock` | `std::sync::Mutex` |
 | --- | --- | --- |
-| uncontended lock/unlock | 2.61 ns | 4.14 ns |
-| `try_lock`, free | 3.28 ns | 4.19 ns |
+| uncontended lock/unlock | 2.40 ns | 4.34 ns |
+| `try_lock`, free | 3.33 ns | 4.17 ns |
 | `try_lock`, held | 2.40 ns | — |
-| contended, 2 threads | 36.0 Melem/s | 44.6 Melem/s |
-| contended, 4 threads | 12.6 Melem/s | 32.1 Melem/s |
-| contended, 12 threads | 4.88 Melem/s | 20.8 Melem/s |
+| contended, 2 threads | 33.8 Melem/s | 43.1 Melem/s |
+| contended, 4 threads | 11.9 Melem/s | 31.9 Melem/s |
+| contended, 12 threads | 4.55 Melem/s | 20.7 Melem/s |
 
-That is the whole trade in one table. Uncontended, the spinlock is
-about 1.6x faster than `Mutex`, because it is two atomic operations
-and nothing else. From two threads onward it loses, and the gap widens
-with every thread added: waiters keep the flag's cache line moving
-between cores and burn their timeslices doing it, while `Mutex` parks
-its waiters and gets out of the way. Note that `Mutex` throughput
-barely degrades past four threads, and the spinlock's keeps falling.
+Uncontended, the spinlock is about 1.8x faster than `Mutex`, because
+it is two atomic operations and nothing else. From two threads onward
+it loses, and the gap widens with every thread added.
 
-The contended sweep stops at the machine's parallelism on purpose.
+The obvious reading of those last three rows is that `Mutex` parks its
+waiters and gets out of the way while the spinlock keeps the flag's
+cache line moving between cores. That is true as far as it goes, and
+it is not the main effect. The fairness table says what is:
+
+| Threads | | Melem/s | batch | spread |
+| --- | --- | --- | --- | --- |
+| 2 | `Spinlock` | 43.9 | 5.4 | 1.23x |
+| 2 | `Mutex` | 54.8 | 7.8 | 1.10x |
+| 4 | `Spinlock` | 15.4 | 4.2 | 1.16x |
+| 4 | `Mutex` | 35.2 | 5.4 | 1.14x |
+| 12 | `Spinlock` | 4.38 | 1.3 | 2.24x |
+| 12 | `Mutex` | 25.5 | 5.2 | 1.04x |
+
+`batch` is acquisitions per handoff. At 12 threads `Mutex` gives the
+lock straight back to the thread that just released it four times out
+of five: it is *barging*, and each acquisition it grants that way is
+one that costs no cache-line transfer at all, because the line is
+already Exclusive on that core. The spinlock at 1.3 pays a genuine
+cross-core transfer nearly every time. `Mutex` is not completing four
+times as many handoffs per second — it is completing about the same
+number of handoffs and rather more acquisitions per handoff.
+
+That is a real advantage and worth having. It is just not the
+advantage the throughput column appears to describe, and it has a
+price the throughput column cannot show, which is why `spread` is
+there: the throughput number and the batch factor rise together, and
+what is being spent to buy them is somebody's acquisition latency.
+Read the two tables together or neither.
+
+The `contended` sweep also flatters the effect, because it is
+saturated by construction. With no work between releasing the lock and
+asking for it again, every thread is at all times either holding or
+waiting, the workload is 100% serial, and no lock can scale: what is
+left to measure is the cost of one handoff under a 12-deep queue.
+`work_ratio` adds the missing axis, at 12 threads, one `spin_loop()`
+costing about 15.5 ns on this machine:
+
+| Non-critical work | `Spinlock` | `std::sync::Mutex` |
+| --- | --- | --- |
+| none | 4.78 Melem/s | 20.2 Melem/s |
+| 4 pauses (~62 ns) | 4.63 Melem/s | 7.76 Melem/s |
+| 16 pauses (~250 ns) | 4.04 Melem/s | 8.29 Melem/s |
+| 64 pauses (~1.0 µs) | 7.34 Melem/s | 8.36 Melem/s |
+| 256 pauses (~4.0 µs) | 2.00 Melem/s | 2.12 Melem/s |
+
+Most of the 4x is gone by the time each thread does 62 ns of work
+outside the lock, and by ~4 µs the two are within noise of each other
+and both are falling — falling because the lock has stopped being the
+constraint and the work has become it. The sweep stops there for that
+reason: further right both columns are just `threads / non-critical
+work`, which measures the pause instruction and not a lock. The threshold is roughly
+`threads × handoff_cost`, which is where the queue starts draining
+faster than it fills; on this machine that is around 12 × 200 ns.
+
+So the honest summary is narrower than the headline. The spinlock's
+win is the uncontended acquire, and it holds it. Its loss is confined
+to the saturated case, and about that case the interesting fact is
+that neither lock scales there — one of them is merely less fair about
+not scaling. What `Spinlock` genuinely lacks is any mechanism to
+degrade gracefully once saturated, and both the parking and the
+barging are such a mechanism.
+
+The contended sweeps stop at the machine's parallelism on purpose.
 Oversubscribing a spinlock is not merely a slow case, it is a
 pathological one: a waiter holds a core doing nothing while the thread
 it is waiting for is descheduled, and the resulting numbers would
 drown out the range that matters. That cliff is the entire reason
 `Spinlock` is documented as suitable only for critical sections short
 enough that spinning beats a context switch.
+
+Note that the fairness target's throughput runs slightly below the
+criterion `contended` figures for the same thread count. Its critical
+section is doing a little more — a comparison and two increments of
+the bookkeeping — and that is the price of being able to see the
+handoffs at all.
 
 `[profile.bench]` keeps debug symbols on, so `perf record --call-graph
 dwarf -- cargo bench -- --profile-time 5` will attribute samples
