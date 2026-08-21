@@ -1,0 +1,20 @@
+[package]
+name = "lockfree-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "spinlock"
+harness = false
+
+# Benchmarks are only meaningful with optimisations on; `cargo bench`
+# uses this profile.
+[profile.bench]
+debug = true       # keep symbols so `perf` can attribute samples
+lto = "thin"
+codegen-units = 1
