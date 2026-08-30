@@ -25,7 +25,6 @@ Currently implemented:
 ```sh
 cargo build                 # debug
 cargo build --release       # optimised
-cargo doc --open            # the commentary reads better rendered
 ```
 
 Warnings are worth keeping at zero here, since most of what this crate
@@ -35,6 +34,36 @@ does is `unsafe`:
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
+
+## Documentation
+
+Most of this crate is commentary — the notes at the top of
+[`src/mcs_spinlock/mod.rs`](src/mcs_spinlock/mod.rs) run to a hundred
+lines before the first `use` — and it reads better rendered than it
+does in a source file.
+
+```sh
+scripts/doc.sh                   # build
+scripts/doc.sh --open            # ... and open it in a browser
+scripts/doc.sh --public          # only the public API, as docs.rs would show it
+scripts/doc.sh --strict          # fail on any rustdoc warning
+```
+
+The script passes `--document-private-items` by default, which is the
+part worth knowing about. `cache::Aligned`, `spin::spin_hint` and the
+MCS node pool are all private, and they are precisely what the prose
+discusses: without the flag rustdoc drops their pages entirely, and
+the links to them from the `mcs_spinlock` header render as plain text
+rather than as hyperlinks. Use `--public` to check what a consumer of
+the crate would actually see.
+
+One wrinkle, in case the output looks contradictory: rustdoc's
+`private_intra_doc_links` lint fires on a public module that links to
+a private item and keeps firing under `--document-private-items`, even
+though the link has by then resolved to a real page. The script
+therefore silences that one lint in its default mode — including under
+`--strict` — and leaves it on under `--public`, where it is telling
+the truth.
 
 ## Test
 
@@ -402,6 +431,7 @@ compiled-in constant is smaller than what the CPU reports.
 cargo fmt --check &&
 cargo clippy --all-targets -- -D warnings &&
 cargo test &&
+scripts/doc.sh --strict &&
 scripts/coverage.sh &&
 scripts/miri.sh --seeds 8 &&
 cargo bench
