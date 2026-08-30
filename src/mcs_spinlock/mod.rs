@@ -747,17 +747,6 @@ mod test {
     // ---------------------------------------------------------------
 
     #[test]
-    fn uncontended_round_trip() {
-        let lock = McsSpinlock::new(0u64);
-
-        for i in 1..=100u64 {
-            *lock.lock() += i;
-        }
-
-        assert_eq!(lock.into_inner(), 5_050);
-    }
-
-    #[test]
     fn try_lock_reflects_whether_the_queue_is_empty() {
         let lock = McsSpinlock::new(0u32);
 

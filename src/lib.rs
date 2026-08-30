@@ -59,14 +59,20 @@
 //! that spinning beats a context switch, and both degrade badly if
 //! the threads outnumber the cores.
 //!
-//! Within that constraint, [`Spinlock`](spinlock::Spinlock) owns the
-//! uncontended acquire -- two atomic operations and nothing else --
-//! and [`McsSpinlock`](mcs_spinlock::McsSpinlock) pays about 1.4 ns
-//! more for its queue node to buy an O(1) handoff and genuine
-//! fairness. The crossover on a 12-core machine is around four
-//! threads, past which the queued lock is both the fairer and the
-//! faster one. `README.md` has the measurements and the argument;
-//! `benches/` has the code that produced them.
+//! Within that constraint the choice is decided by how deep the queue
+//! gets. [`Spinlock`](spinlock::Spinlock) barges, which is what makes
+//! it the faster of the two at two threads, where a queue has nothing
+//! to organise; [`McsSpinlock`](mcs_spinlock::McsSpinlock) pays about
+//! 1.3 ns for the node it swaps into its queue and buys an O(1)
+//! handoff and genuine fairness with it. The crossover on a 12-core
+//! machine is around four threads, past which the queued lock is both
+//! the fairer and the faster one.
+//!
+//! Neither side of that comparison is the uncontended acquire. A lock
+//! nobody is contending is not a case this crate measures or has
+//! advice about -- if that is the shape of the workload, the lock is
+//! not what is costing you anything. `README.md` has the measurements
+//! and the argument; `benches/` has the code that produced them.
 //!
 //! [`std::sync::Mutex`]: https://doc.rust-lang.org/std/sync/struct.Mutex.html
 

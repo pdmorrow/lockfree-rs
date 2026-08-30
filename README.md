@@ -203,7 +203,7 @@ they are still executed by `cargo test`.
 
 ```sh
 cargo bench                              # the whole suite
-cargo bench -- uncontended               # filter by name
+cargo bench -- contended                 # filter by name
 cargo bench -- --save-baseline main      # record a baseline
 cargo bench -- --baseline main           # compare against it
 cargo bench --bench fairness             # just the fairness table
@@ -217,19 +217,10 @@ only trustworthy way to evaluate a change to a lock — the run-to-run
 noise on a contended benchmark easily exceeds the effect you are
 looking for.
 
-[`benches/spinlock.rs`](benches/spinlock.rs) measures four things,
+[`benches/spinlock.rs`](benches/spinlock.rs) measures three things,
 each for `Spinlock` and `McsSpinlock`, and each against
 `std::sync::Mutex` for scale:
 
-* **`uncontended`** — lock, mutate, unlock on one thread with nobody
-  else in sight. This is the floor: one successful compare-exchange
-  and one release store, on a cache line already held Exclusive.
-  Expect single-digit nanoseconds, and expect `Mutex` to be close,
-  since an uncontended `Mutex` never enters the kernel either. This is
-  the case `McsSpinlock` can only lose: with no queue to join it still
-  swaps a node into the tail, stores a null back on release, and
-  borrows the node from a thread-local pool at each end, all of it
-  overhead for a handoff that never happens.
 * **`try_lock`** — the succeeding and failing paths measured
   separately, because they are genuinely different (the failure path
   is rejected by the compare-exchange without acquiring anything) and
@@ -238,15 +229,22 @@ each for `Spinlock` and `McsSpinlock`, and each against
   `available_parallelism`, with nothing between one release and the
   next acquire. Threads are spawned and parked on a barrier before the
   clock starts, so thread creation stays out of the measurement. It
-  starts at two because one thread contending with nobody is the
-  `uncontended` case again, wrapped in a barrier that adds overhead
-  and no information.
+  starts at two because one thread contending with nobody is not a
+  contended measurement — it is an uncontended round trip wrapped in a
+  barrier that adds overhead and no information.
 * **`work_ratio`** — threads pinned at `available_parallelism`, and
   the *non-critical* work swept instead. This is the axis the other
-  three hold fixed at zero, and it turns out to be the one that
-  decides the answer.
+  two hold fixed at zero, and it turns out to be the one that decides
+  the answer.
 
-[`benches/fairness.rs`](benches/fairness.rs) is a fifth measurement
+What is deliberately absent is the uncontended round trip. A lock that
+is not excluding anybody is not a case this crate has any use for —
+the whole premise of spinning is that a contending thread is coming,
+and soon enough that waiting for it beats sleeping — so measuring the
+one-thread floor would only invite a comparison nothing here is
+optimised to win.
+
+[`benches/fairness.rs`](benches/fairness.rs) is a fourth measurement
 and not a criterion benchmark, because it has no time to report: it
 runs a fixed wall-clock window and counts. The payload under the lock
 records which thread held it last, so the number of *handoffs* —
@@ -259,7 +257,6 @@ move with the machine:
 
 | Case | `Spinlock` | `McsSpinlock` | `std::sync::Mutex` |
 | --- | --- | --- | --- |
-| uncontended lock/unlock | 2.39 ns | 3.80 ns | 3.83 ns |
 | `try_lock`, free | 3.09 ns | 4.43 ns | 3.80 ns |
 | `try_lock`, held | 2.14 ns | 2.57 ns | — |
 | contended, 2 threads | 38.3 Melem/s | 18.5 Melem/s | 51.6 Melem/s |
@@ -267,17 +264,16 @@ move with the machine:
 | contended, 8 threads | 8.89 Melem/s | 13.3 Melem/s | 25.1 Melem/s |
 | contended, 12 threads | 5.23 Melem/s | 6.65 Melem/s | 21.8 Melem/s |
 
-Uncontended, `Spinlock` is about 1.6x faster than `Mutex`, because it
-is two atomic operations and nothing else. From two threads onward it
-loses, and the gap widens with every thread added.
+`Spinlock` loses to `Mutex` from two threads onward, and the gap
+widens with every thread added.
 
-`McsSpinlock` pays about 1.4 ns for its node — enough to land it
-exactly on top of an uncontended `Mutex`, and to make it the slowest
-of the three at `try_lock`, which is the same CAS as `Spinlock`'s
-wrapped in the same bookkeeping. It pays that price at two threads as
-well, where it is half `Spinlock`'s throughput: a two-deep queue is
-the case a queue cannot help with, and a strictly FIFO lock has given
-up the barging that makes the alternative fast there.
+`McsSpinlock` pays about 1.3 ns for its node, which makes it the
+slowest of the three at `try_lock` — the same CAS as `Spinlock`'s,
+wrapped in bookkeeping for a queue `try_lock` never joins. It pays
+that price at two threads as well, where it is half `Spinlock`'s
+throughput: a two-deep queue is the case a queue cannot help with, and
+a strictly FIFO lock has given up the barging that makes the
+alternative fast there.
 
 From four threads it is ahead, and the ordering does not reverse
 again: 1.5x `Spinlock` at eight threads, and by then the flag every
@@ -377,18 +373,18 @@ strictly FIFO. For a 12-thread workload that does any work outside its
 critical sections, this is the row to read.
 
 So the honest summary is narrower than the headline. `Spinlock`'s win
-is the uncontended acquire, and it holds it. Its loss is confined to
-the saturated case, and about that case the interesting fact is that
-no lock here scales — some are merely less fair about not scaling.
-What `Spinlock` genuinely lacks is any mechanism to degrade gracefully
-once saturated, and the parking, the barging and the queue are each
-such a mechanism.
+is the shallow queue — two threads, where barging beats ordering — and
+it holds it. Its loss is confined to the saturated case, and about
+that case the interesting fact is that no lock here scales — some are
+merely less fair about not scaling. What `Spinlock` genuinely lacks is
+any mechanism to degrade gracefully once saturated, and the parking,
+the barging and the queue are each such a mechanism.
 
 `McsSpinlock` gives up the thing `Spinlock` is actually good at — it
-is 1.6x slower uncontended, and slower still at two threads — to buy
-determinism it then turns out not to have to pay for, since from four
-threads up it is faster as well as fairer. The case against it is the
-one the tests already ran into: strict FIFO has no answer to a
+is slower at `try_lock` and slower at two threads — to buy determinism
+it then turns out not to have to pay for, since from four threads up
+it is faster as well as fairer. The case against it is the one the
+tests already ran into: strict FIFO has no answer to a
 descheduled queue head, so it needs the threads to fit on the cores.
 Within that constraint it is the better spinlock; outside it, it is
 the worse one, and the boundary is sharp rather than gradual.

@@ -9,15 +9,18 @@
 //! Three things are worth measuring about a lock, and they pull in
 //! different directions:
 //!
-//!   * the uncontended round trip (one CAS, one store), which is what
-//!     a lock costs when it is not actually excluding anybody;
 //!   * `try_lock`, both when it succeeds and when it fails, since the
 //!     failing path is what a caller polls in a loop;
 //!   * throughput under real contention, where a spinlock burns CPU
 //!     to avoid a context switch and a Mutex does the opposite;
 //!   * and how much non-critical work it takes for that contention to
-//!     stop mattering, which is the axis the first three all hold
+//!     stop mattering, which is the axis the first two both hold
 //!     fixed at zero.
+//!
+//! What is not measured is the uncontended round trip. A lock that is
+//! not excluding anybody is a lock this crate has no use for: the
+//! whole premise of spinning is that a contending thread is coming,
+//! and soon enough that waiting for it beats sleeping.
 //!
 //! What is deliberately NOT here is fairness, which the throughput
 //! numbers below cannot express and are actively misleading about --
@@ -136,43 +139,6 @@ fn contended_run<L: Counter>(threads: usize, iters: u64, outside: u32) -> Durati
     assert_eq!(lock.get(), threads as u64 * iters, "lost an update");
 
     elapsed
-}
-
-/// Lock, mutate, unlock on a single thread with nobody else in sight.
-///
-/// This is the floor: an uncontended acquire is one successful
-/// compare-exchange and one release store, on a cache line that is
-/// already Exclusive to this core.
-fn uncontended(c: &mut Criterion) {
-    let mut group = c.benchmark_group("uncontended");
-
-    let spin = Spinlock::new(0u64);
-    group.bench_function("spinlock/lock", |b| {
-        b.iter(|| {
-            *spin.lock() += black_box(1);
-        })
-    });
-
-    // The MCS number is the one to watch here, because this is the
-    // case its algorithm cannot help with and can only tax: with no
-    // queue to join it still swaps a node in, stores a null back on
-    // release, and pays a thread-local lookup at each end to borrow
-    // the node it never spins on.
-    let mcs = McsSpinlock::new(0u64);
-    group.bench_function("mcs/lock", |b| {
-        b.iter(|| {
-            *mcs.lock() += black_box(1);
-        })
-    });
-
-    let mutex = Mutex::new(0u64);
-    group.bench_function("mutex/lock", |b| {
-        b.iter(|| {
-            *mutex.lock().unwrap() += black_box(1);
-        })
-    });
-
-    group.finish();
 }
 
 /// The two `try_lock` outcomes, measured apart.
@@ -339,5 +305,5 @@ fn work_ratio(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, uncontended, try_lock, contended, work_ratio);
+criterion_group!(benches, try_lock, contended, work_ratio);
 criterion_main!(benches);

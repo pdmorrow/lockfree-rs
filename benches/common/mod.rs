@@ -20,10 +20,12 @@ use std::time::Instant;
 /// parallelism.
 ///
 /// Starting at two, because one thread contending with nobody is not
-/// a contended measurement. With no work outside the critical section
-/// it is precisely the `uncontended` benchmark, wrapped in a thread
-/// spawn and a barrier that contribute overhead and no information,
-/// and its fairness is 1.00x by construction rather than by merit.
+/// a contended measurement: with no work outside the critical section
+/// it measures an uncontended round trip wrapped in a thread spawn
+/// and a barrier that contribute overhead and no information, and its
+/// fairness is 1.00x by construction rather than by merit. The
+/// uncontended case is not one this crate measures at all -- see the
+/// header of `benches/spinlock.rs` for why.
 ///
 /// Stopping at `available_parallelism` is deliberate. Oversubscribing
 /// a spinlock is not a slow case but a pathological one -- a waiter
