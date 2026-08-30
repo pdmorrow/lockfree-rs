@@ -83,7 +83,7 @@ rm -rf "$OUT"
 mkdir -p "$RAW"
 
 export RUSTFLAGS="${RUSTFLAGS:-} -C instrument-coverage"
-export LLVM_PROFILE_FILE="$PWD/$RAW/lockfree-%p-%m.profraw"
+export LLVM_PROFILE_FILE="$PWD/$RAW/spinlock-rs-%p-%m.profraw"
 
 # Coverage needs its own build (the instrumentation changes every
 # object file), and a separate target dir keeps it from thrashing the

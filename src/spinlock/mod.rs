@@ -73,7 +73,7 @@ pub use crate::cache::CACHE_LINE_ALIGN;
 /// # Examples
 ///
 /// ```
-/// use lockfree_rs::spinlock::Spinlock;
+/// use spinlock_rs::spinlock::Spinlock;
 ///
 /// let lock = Spinlock::new(0u32);
 /// *lock.lock() += 1;
@@ -306,7 +306,7 @@ impl<T: ?Sized> Spinlock<T> {
     /// # Examples
     ///
     /// ```
-    /// use lockfree_rs::spinlock::Spinlock;
+    /// use spinlock_rs::spinlock::Spinlock;
     ///
     /// let lock = Spinlock::new(());
     /// let guard = lock.lock();

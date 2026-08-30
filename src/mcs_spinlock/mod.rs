@@ -287,7 +287,7 @@ unsafe fn return_node(node: *mut Node) {
 /// # Examples
 ///
 /// ```
-/// use lockfree_rs::mcs_spinlock::McsSpinlock;
+/// use spinlock_rs::mcs_spinlock::McsSpinlock;
 ///
 /// let lock = McsSpinlock::new(0u32);
 /// *lock.lock() += 1;
@@ -472,7 +472,7 @@ impl<T: ?Sized> McsSpinlock<T> {
     /// # Examples
     ///
     /// ```
-    /// use lockfree_rs::mcs_spinlock::McsSpinlock;
+    /// use spinlock_rs::mcs_spinlock::McsSpinlock;
     ///
     /// let lock = McsSpinlock::new(());
     /// let guard = lock.lock();

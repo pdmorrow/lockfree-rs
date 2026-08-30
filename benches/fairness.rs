@@ -35,8 +35,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant};
 
-use lockfree_rs::mcs_spinlock::McsSpinlock;
-use lockfree_rs::spinlock::Spinlock;
+use spinlock_rs::mcs_spinlock::McsSpinlock;
+use spinlock_rs::spinlock::Spinlock;
 
 mod common;
 use common::thread_counts;

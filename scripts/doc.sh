@@ -71,7 +71,7 @@ export RUSTDOCFLAGS="$FLAGS"
 echo "==> cargo doc ${ARGS[*]}"
 cargo doc "${ARGS[@]}" "${CARGO_ARGS[@]}"
 
-INDEX="target/doc/lockfree_rs/index.html"
+INDEX="target/doc/spinlock_rs/index.html"
 echo "==> $INDEX"
 
 if [[ $OPEN -eq 1 ]]; then

@@ -30,8 +30,8 @@ use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use lockfree_rs::mcs_spinlock::McsSpinlock;
-use lockfree_rs::spinlock::Spinlock;
+use spinlock_rs::mcs_spinlock::McsSpinlock;
+use spinlock_rs::spinlock::Spinlock;
 
 mod common;
 use common::{pause_nanos, spin_work, thread_counts};

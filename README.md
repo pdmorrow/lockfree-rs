@@ -1,4 +1,4 @@
-# lockfree-rs
+# spinlock-rs
 
 Concurrency primitives written from scratch, for study rather than for
 production: the point is that every line of the implementation is
@@ -90,8 +90,8 @@ None of which is needed to read the docs. The path is printed on every
 run, so the browser can be skipped:
 
 ```sh
-xdg-open target/doc/lockfree_rs/index.html
-python3 -m http.server -d target/doc 8000   # http://localhost:8000/lockfree_rs/
+xdg-open target/doc/spinlock_rs/index.html
+python3 -m http.server -d target/doc 8000   # http://localhost:8000/spinlock_rs/
 ```
 
 Prefer the second over SSH: a `file://` URL does not survive a port
