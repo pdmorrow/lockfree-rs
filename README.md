@@ -1,8 +1,8 @@
 # spinlock-rs
 
-Concurrency primitives written from scratch, for study rather than for
-production: the point is that every line of the implementation is
-explained, tested, and measured.
+Concurrency primitives written from scratch, for study mainly but more
+than suitable for production: from a learning perspective every line of
+the implementation is explained, tested, and measured.
 
 Currently implemented:
 
@@ -195,15 +195,6 @@ The script uses rustc's own `-C instrument-coverage` and the
 `llvm-profdata`/`llvm-cov` pair from the toolchain's sysroot, so it
 works without `cargo-llvm-cov` (which is nicer, and which you should
 prefer if you have rustup: `cargo llvm-cov --html`).
-
-**The target is 100% of the library, and the build fails below it.**
-That is a stricter number than it sounds, because the figure being
-gated is not the one llvm-cov prints at the bottom of its table. The
-unit tests live inside `src/**` in a `#[cfg(test)] mod test`, and test
-code is by definition almost all executed, so including it would pad
-the total with several hundred guaranteed-green lines. The gate counts
-only the lines above the `#[cfg(test)]` marker in each file — the
-library itself — and lists every line that was never executed.
 
 Doctests are not instrumented (that needs unstable rustdoc flags);
 they are still executed by `cargo test`.
