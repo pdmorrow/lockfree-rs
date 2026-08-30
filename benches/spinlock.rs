@@ -1,5 +1,10 @@
-//! Benchmarks for [`Spinlock`], measured side by side with
-//! [`std::sync::Mutex`] so the numbers have a reference point.
+//! Benchmarks for [`Spinlock`] and [`McsSpinlock`], measured side by
+//! side with [`std::sync::Mutex`] so the numbers have a reference
+//! point.
+//!
+//! The two spinlocks differ only in how they make waiters wait, so
+//! every case here runs both: the pair is the comparison, and the
+//! Mutex column is the scale it is read against.
 //!
 //! Three things are worth measuring about a lock, and they pull in
 //! different directions:
@@ -25,16 +30,17 @@ use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use lockfree_rs::mcs_spinlock::McsSpinlock;
 use lockfree_rs::spinlock::Spinlock;
 
 mod common;
 use common::{pause_nanos, spin_work, thread_counts};
 
-/// The one operation both locks are asked to perform: take the lock,
+/// The one operation every lock is asked to perform: take the lock,
 /// mutate the payload, release it.
 ///
 /// A trait rather than a copy-pasted closure so the contended harness
-/// below is written once and the two implementations cannot silently
+/// below is written once and the three implementations cannot silently
 /// drift into measuring different amounts of work.
 trait Counter: Sync {
     fn new() -> Self;
@@ -45,6 +51,20 @@ trait Counter: Sync {
 impl Counter for Spinlock<u64> {
     fn new() -> Self {
         Spinlock::new(0)
+    }
+
+    fn bump(&self) {
+        *self.lock() += 1;
+    }
+
+    fn get(&self) -> u64 {
+        *self.lock()
+    }
+}
+
+impl Counter for McsSpinlock<u64> {
+    fn new() -> Self {
+        McsSpinlock::new(0)
     }
 
     fn bump(&self) {
@@ -133,6 +153,18 @@ fn uncontended(c: &mut Criterion) {
         })
     });
 
+    // The MCS number is the one to watch here, because this is the
+    // case its algorithm cannot help with and can only tax: with no
+    // queue to join it still swaps a node in, stores a null back on
+    // release, and pays a thread-local lookup at each end to borrow
+    // the node it never spins on.
+    let mcs = McsSpinlock::new(0u64);
+    group.bench_function("mcs/lock", |b| {
+        b.iter(|| {
+            *mcs.lock() += black_box(1);
+        })
+    });
+
     let mutex = Mutex::new(0u64);
     group.bench_function("mutex/lock", |b| {
         b.iter(|| {
@@ -168,6 +200,26 @@ fn try_lock(c: &mut Criterion) {
         b.iter(|| black_box(held.try_lock()).is_none())
     });
     drop(_guard);
+
+    // `McsSpinlock::try_lock` makes the same single strong CAS as
+    // `Spinlock::try_lock` -- it never queues, since queueing is the
+    // one thing a caller polling in a loop does not want -- so the
+    // difference between these two rows is the node bookkeeping and
+    // nothing else.
+    let mcs = McsSpinlock::new(0u64);
+    group.bench_function("mcs/free", |b| {
+        b.iter(|| {
+            let mut g = mcs.try_lock().unwrap();
+            *g += black_box(1);
+        })
+    });
+
+    let mcs_held = McsSpinlock::new(0u64);
+    let _mcs_guard = mcs_held.lock();
+    group.bench_function("mcs/held", |b| {
+        b.iter(|| black_box(mcs_held.try_lock()).is_none())
+    });
+    drop(_mcs_guard);
 
     let mutex = Mutex::new(0u64);
     group.bench_function("mutex/free", |b| {
@@ -207,6 +259,10 @@ fn contended(c: &mut Criterion) {
             &threads,
             |b, &threads| b.iter_custom(|iters| contended_run::<Spinlock<u64>>(threads, iters, 0)),
         );
+
+        group.bench_with_input(BenchmarkId::new("mcs", threads), &threads, |b, &threads| {
+            b.iter_custom(|iters| contended_run::<McsSpinlock<u64>>(threads, iters, 0))
+        });
 
         group.bench_with_input(
             BenchmarkId::new("mutex", threads),
@@ -266,6 +322,10 @@ fn work_ratio(c: &mut Criterion) {
                 b.iter_custom(|iters| contended_run::<Spinlock<u64>>(threads, iters, outside))
             },
         );
+
+        group.bench_with_input(BenchmarkId::new("mcs", outside), &outside, |b, &outside| {
+            b.iter_custom(|iters| contended_run::<McsSpinlock<u64>>(threads, iters, outside))
+        });
 
         group.bench_with_input(
             BenchmarkId::new("mutex", outside),

@@ -10,6 +10,13 @@
 //! Nothing in a throughput number distinguishes that from a lock that
 //! is genuinely fast.
 //!
+//! This is also the table [`McsSpinlock`] exists for. Its whole
+//! claim is that arrival order is service order, which is a claim
+//! about the batch and spread columns and about nothing else: a FIFO
+//! lock cannot barge, so it cannot buy throughput the way the other
+//! two do, and a throughput-only comparison would score it purely on
+//! the price it pays and never on what it buys.
+//!
 //! So this target measures the thing that distinguishes them. The
 //! payload under the lock records which thread touched it last, which
 //! makes the count of *handoffs* -- acquisitions that changed hands --
@@ -28,6 +35,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant};
 
+use lockfree_rs::mcs_spinlock::McsSpinlock;
 use lockfree_rs::spinlock::Spinlock;
 
 mod common;
@@ -72,10 +80,10 @@ impl Payload {
     }
 }
 
-/// The operation both locks are asked to perform.
+/// The operation every lock is asked to perform.
 ///
 /// The same trait-not-closure reasoning as in the throughput target:
-/// written once, so the two implementations cannot drift into doing
+/// written once, so the three implementations cannot drift into doing
 /// different amounts of work inside the critical section.
 trait Tracked: Sync {
     fn new() -> Self;
@@ -86,6 +94,21 @@ trait Tracked: Sync {
 impl Tracked for Spinlock<Payload> {
     fn new() -> Self {
         Spinlock::new(Payload::new())
+    }
+
+    fn bump(&self, id: usize) {
+        self.lock().touch(id);
+    }
+
+    fn read(&self) -> (u64, u64) {
+        let p = self.lock();
+        (p.acquisitions, p.handoffs)
+    }
+}
+
+impl Tracked for McsSpinlock<Payload> {
+    fn new() -> Self {
+        McsSpinlock::new(Payload::new())
     }
 
     fn bump(&self, id: usize) {
@@ -218,6 +241,7 @@ fn main() {
 
     for threads in thread_counts() {
         print_row("spinlock", threads, measure::<Spinlock<Payload>>(threads));
+        print_row("mcs", threads, measure::<McsSpinlock<Payload>>(threads));
         print_row("mutex", threads, measure::<Mutex<Payload>>(threads));
     }
 
