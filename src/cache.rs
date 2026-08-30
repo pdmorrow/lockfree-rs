@@ -33,10 +33,15 @@
 // use on each architecture, since over-aligning costs padding while
 // under-aligning silently costs coherence traffic:
 //
-//   x86_64      128, not 64. The lines are 64 bytes, but Intel's L2
-//               adjacent-line prefetcher fetches them in aligned
-//               128-byte pairs, so two atomics 64 bytes apart still
-//               ping-pong as if they shared a line.
+//   x86_64      128, not 64. The coherence granule is 64 -- that
+//               is what the OS reports and what MESI tracks. The
+//               extra 64 is for Intel's L2 adjacent-line prefetcher,
+//               which completes every fetched line to an aligned
+//               128-byte pair: a write to one line invalidates the
+//               pair line other cores speculatively pulled in.
+//               Weaker than true false sharing, and absent on AMD,
+//               but the padding is cheap. folly and Java's
+//               @Contended pad to 128 for the same reason.
 //   aarch64     128. Apple silicon uses 128-byte lines; most other
 //               ARM64 cores use 64.
 //   powerpc64   128, s390x 256, both the hardware line size.
