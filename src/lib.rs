@@ -1,8 +1,7 @@
-//! Concurrency primitives written from scratch, for study rather than
-//! for production.
+//! Concurrency primitives written from scratch.
 //!
-//! The point of this crate is not the API, which is deliberately the
-//! same shape as [`std::sync::Mutex`]'s, but the reasoning behind the
+//! The point of this crate is both the API, which is deliberately the
+//! same shape as [`std::sync::Mutex`]'s, and also the reasoning behind the
 //! implementation: why a flag is padded to 128 bytes on x86_64, why a
 //! queued lock cannot cheaply support a timeout, why the fair lock is
 //! also the faster one past four threads. That reasoning lives in the
@@ -11,11 +10,6 @@
 //! ```sh
 //! scripts/doc.sh --open
 //! ```
-//!
-//! The script defaults to `--document-private-items` on purpose. The
-//! machinery the prose is about -- the cache-line padding, the spin
-//! hint, the MCS node pool -- is all private, and without that flag
-//! rustdoc drops it and the links pointing at it go dead.
 //!
 //! # The locks
 //!
