@@ -1,118 +1,18 @@
 //! A spinlock: mutual exclusion by busy-waiting rather than parking.
 
 use std::cell::UnsafeCell;
-use std::hint::spin_loop;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// Forces whatever it wraps onto its own cache-line-sized slot, so
-// the contended atomic flag can't share a line with the data it
-// protects, or with a neighbouring Spinlock in an array. Without
-// this, a CAS on one lock would invalidate the line holding the
-// other: "false sharing".
-//
-// Why the alignment is picked per target instead of asked of the OS
-//
-// The platform does know: Linux reports it in
-// /sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size and
-// via sysconf(_SC_LEVEL1_DCACHE_LINESIZE), macOS in
-// sysctl hw.cachelinesize. But `repr(align(N))` needs N as a
-// literal in the attribute, evaluated when the type is laid out, so
-// a value read at runtime can never reach it -- by the time the
-// process can call sysconf, every offset in the struct is already
-// fixed. A build script could bridge the gap by emitting a cfg, but
-// it would bake the *build* machine's cache geometry into the
-// artifact, which is wrong the moment you cross-compile or ship a
-// binary. So the choice is made from the target architecture, and
-// the runtime value is used to CHECK that choice rather than to
-// make it -- see `alignment_covers_the_platform_cache_line` in the
-// tests, which reads the OS's number and fails if we guessed low.
-//
-// The numbers are the conservative ones, i.e. the largest line in
-// use on each architecture, since over-aligning costs padding while
-// under-aligning silently costs coherence traffic:
-//
-//   x86_64      128, not 64. The lines are 64 bytes, but Intel's L2
-//               adjacent-line prefetcher fetches them in aligned
-//               128-byte pairs, so two atomics 64 bytes apart still
-//               ping-pong as if they shared a line.
-//   aarch64     128. Apple silicon uses 128-byte lines; most other
-//               ARM64 cores use 64.
-//   powerpc64   128, s390x 256, both the hardware line size.
-//   arm/riscv/  32 and 64 respectively on the common cores.
-//   others      64, the near-universal default.
-//
-// This is the same table crossbeam's CachePadded arrived at.
-#[cfg_attr(
-    any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "powerpc64",
-    ),
-    repr(align(128))
-)]
-#[cfg_attr(target_arch = "s390x", repr(align(256)))]
-#[cfg_attr(
-    any(target_arch = "arm", target_arch = "mips", target_arch = "mips64"),
-    repr(align(32))
-)]
-#[cfg_attr(
-    not(any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "powerpc64",
-        target_arch = "s390x",
-        target_arch = "arm",
-        target_arch = "mips",
-        target_arch = "mips64",
-    )),
-    repr(align(64))
-)]
-#[derive(Debug)]
-struct Aligned<T>(T);
+use crate::cache::Aligned;
+use crate::spin::spin_hint;
 
-/// The padding this crate assumes a cache line needs, in bytes.
-///
-/// Chosen at compile time from the target architecture, and always
-/// at least the true line size, so two values this far apart never
-/// share a line (or a prefetch pair) on the targets listed above.
-///
-/// Derived from the type rather than written out a second time, so
-/// the constant cannot drift away from the layout it describes.
-pub const CACHE_LINE_ALIGN: usize = align_of::<Aligned<u8>>();
-
-impl<T> Deref for Aligned<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-/// The pause executed on each trip around a spin loop.
-///
-/// Natively this is the architecture's spin hint (`pause` on x86,
-/// `yield` on ARM): it does not give up the core, it just tells the
-/// pipeline not to speculate its way through a tight loop and to let
-/// a sibling hyperthread have the issue slots.
-///
-/// Under Miri there is no pipeline and no parallelism -- threads are
-/// interleaved by an interpreter -- so a hint that does nothing
-/// leaves the holder waiting on a scheduler that only preempts at a
-/// low fixed rate. Yielding instead hands the interpreter an
-/// explicit switch point, which turns a spin that takes thousands of
-/// interpreted steps into one that takes a handful.
-#[inline]
-fn spin_hint() {
-    // `cfg!` rather than `#[cfg]` so both arms are always compiled
-    // and type-checked; the branch folds away at compile time.
-    if cfg!(miri) {
-        std::thread::yield_now();
-    } else {
-        spin_loop();
-    }
-}
+// Re-exported rather than defined here. The padding table and the
+// spin hint moved to `crate::cache` and `crate::spin` when the MCS
+// lock started needing them too; this is the path the docs and the
+// tests below have always used, so it stays.
+pub use crate::cache::CACHE_LINE_ALIGN;
 
 // `T: ?Sized` -- the one bound that REMOVES a requirement
 //
