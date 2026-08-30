@@ -9,6 +9,7 @@ Currently implemented:
 | Module | Type | Summary |
 | --- | --- | --- |
 | [`spinlock`](src/spinlock/mod.rs) | `Spinlock<T>` | Mutual exclusion by busy-waiting. Test-and-test-and-set on a cache-line-padded flag, RAII guard, no poisoning, supports unsized `T`. |
+| [`mcs_spinlock`](src/mcs_spinlock/mod.rs) | `McsSpinlock<T>` | The same, queued. Mellor-Crummey/Scott: waiters spin on their own node instead of a shared flag, so a handoff costs one cache line transfer no matter how many are waiting, and the lock is strictly FIFO. |
 
 ## Requirements
 
@@ -43,14 +44,31 @@ cargo test --lib            # unit tests only
 cargo test -- --nocapture   # show output from the tests that print
 ```
 
-The suite in [`src/spinlock/mod.rs`](src/spinlock/mod.rs) covers four
-kinds of claim: trait bounds (compile-time assertions that
-`Spinlock<Cell<u32>>` is `Sync` and friends), memory layout,
-single-threaded behaviour including drop counts and unwinding, and
-concurrency. The concurrency tests are the interesting ones — they use
-a non-atomic `u64` payload deliberately, so any failure to serialise
-shows up as a lost update rather than as something the hardware papers
-over.
+Each lock's suite lives beside it and covers four kinds of claim:
+trait bounds (compile-time assertions that `Spinlock<Cell<u32>>` is
+`Sync` and friends), memory layout, single-threaded behaviour
+including drop counts and unwinding, and concurrency. The concurrency
+tests are the interesting ones — they use a non-atomic `u64` payload
+deliberately, so any failure to serialise shows up as a lost update
+rather than as something the hardware papers over.
+
+[`src/mcs_spinlock/mod.rs`](src/mcs_spinlock/mod.rs) adds two
+categories of its own: the node pool (that guards may be dropped out
+of order, that acquisitions recycle nodes instead of allocating, and
+that a lock taken from inside a thread-local destructor still works
+after the pool has been destroyed), and the layout of the queue node
+itself, whose flag and link must not share a line.
+
+Its concurrency tests use a fixed four threads where the `spinlock`
+ones scale with `available_parallelism`, and the difference is the
+algorithm rather than an arbitrary choice. `cargo test` runs tests in
+parallel, so the machine is oversubscribed — which a barging lock
+shrugs off and a strictly FIFO one cannot. On a 12-core box, letting
+the MCS tests ask for 12 threads each took the suite from 0.09 seconds
+to 64; the same tests with the machine to themselves run in 0.03
+either way. That is the convoy cost of no barging, reproduced
+accidentally, and it is worth keeping in mind before reading the
+benchmark section below.
 
 ### Miri
 
@@ -98,7 +116,7 @@ time.
 
 To check that this arrangement has teeth, weaken the guard's
 `Ordering::Release` store to `Ordering::Relaxed` and run both:
-`cargo test` passes all 17 tests on x86 in a tenth of a second, while
+`cargo test` passes all 38 tests on x86 in a tenth of a second, while
 Miri fails `writes_are_published_to_the_next_holder` with a data race
 between the retag in one thread's critical section and the `Deref` in
 the next holder's. That gap is the entire argument for running this
@@ -148,13 +166,18 @@ noise on a contended benchmark easily exceeds the effect you are
 looking for.
 
 [`benches/spinlock.rs`](benches/spinlock.rs) measures four things,
-each against `std::sync::Mutex` for scale:
+each for `Spinlock` and `McsSpinlock`, and each against
+`std::sync::Mutex` for scale:
 
 * **`uncontended`** — lock, mutate, unlock on one thread with nobody
   else in sight. This is the floor: one successful compare-exchange
   and one release store, on a cache line already held Exclusive.
   Expect single-digit nanoseconds, and expect `Mutex` to be close,
-  since an uncontended `Mutex` never enters the kernel either.
+  since an uncontended `Mutex` never enters the kernel either. This is
+  the case `McsSpinlock` can only lose: with no queue to join it still
+  swaps a node into the tail, stores a null back on release, and
+  borrows the node from a thread-local pool at each end, all of it
+  overhead for a handoff that never happens.
 * **`try_lock`** — the succeeding and failing paths measured
   separately, because they are genuinely different (the failure path
   is rejected by the compare-exchange without acquiring anything) and
@@ -182,39 +205,60 @@ Illustrative output, from an AMD Ryzen 5 5600U (12 hardware
 threads); treat the shape as the result, not the digits, since they
 move with the machine:
 
-| Case | `Spinlock` | `std::sync::Mutex` |
-| --- | --- | --- |
-| uncontended lock/unlock | 2.40 ns | 4.34 ns |
-| `try_lock`, free | 3.33 ns | 4.17 ns |
-| `try_lock`, held | 2.40 ns | — |
-| contended, 2 threads | 33.8 Melem/s | 43.1 Melem/s |
-| contended, 4 threads | 11.9 Melem/s | 31.9 Melem/s |
-| contended, 12 threads | 4.55 Melem/s | 20.7 Melem/s |
+| Case | `Spinlock` | `McsSpinlock` | `std::sync::Mutex` |
+| --- | --- | --- | --- |
+| uncontended lock/unlock | 2.39 ns | 3.80 ns | 3.83 ns |
+| `try_lock`, free | 3.09 ns | 4.43 ns | 3.80 ns |
+| `try_lock`, held | 2.14 ns | 2.57 ns | — |
+| contended, 2 threads | 38.3 Melem/s | 18.5 Melem/s | 51.6 Melem/s |
+| contended, 4 threads | 13.7 Melem/s | 15.3 Melem/s | 34.3 Melem/s |
+| contended, 8 threads | 8.89 Melem/s | 13.3 Melem/s | 25.1 Melem/s |
+| contended, 12 threads | 5.23 Melem/s | 6.65 Melem/s | 21.8 Melem/s |
 
-Uncontended, the spinlock is about 1.8x faster than `Mutex`, because
-it is two atomic operations and nothing else. From two threads onward
-it loses, and the gap widens with every thread added.
+Uncontended, `Spinlock` is about 1.6x faster than `Mutex`, because it
+is two atomic operations and nothing else. From two threads onward it
+loses, and the gap widens with every thread added.
 
-The obvious reading of those last three rows is that `Mutex` parks its
-waiters and gets out of the way while the spinlock keeps the flag's
-cache line moving between cores. That is true as far as it goes, and
-it is not the main effect. The fairness table says what is:
+`McsSpinlock` pays about 1.4 ns for its node — enough to land it
+exactly on top of an uncontended `Mutex`, and to make it the slowest
+of the three at `try_lock`, which is the same CAS as `Spinlock`'s
+wrapped in the same bookkeeping. It pays that price at two threads as
+well, where it is half `Spinlock`'s throughput: a two-deep queue is
+the case a queue cannot help with, and a strictly FIFO lock has given
+up the barging that makes the alternative fast there.
+
+From four threads it is ahead, and the ordering does not reverse
+again: 1.5x `Spinlock` at eight threads, and by then the flag every
+TTAS waiter shares is being invalidated on every release while each
+MCS waiter is spinning on a line nobody else touches. That is the
+algorithm doing what it was designed to do.
+
+The obvious reading of the `Mutex` column is that it parks its waiters
+and gets out of the way while both spinlocks keep a cache line moving
+between cores. That is true as far as it goes, and it is not the main
+effect. The fairness table says what is:
 
 | Threads | | Melem/s | batch | spread |
 | --- | --- | --- | --- | --- |
-| 2 | `Spinlock` | 43.9 | 5.4 | 1.23x |
-| 2 | `Mutex` | 54.8 | 7.8 | 1.10x |
-| 4 | `Spinlock` | 15.4 | 4.2 | 1.16x |
-| 4 | `Mutex` | 35.2 | 5.4 | 1.14x |
-| 12 | `Spinlock` | 4.38 | 1.3 | 2.24x |
-| 12 | `Mutex` | 25.5 | 5.2 | 1.04x |
+| 2 | `Spinlock` | 35.8 | 3.4 | 1.05x |
+| 2 | `McsSpinlock` | 17.7 | 1.0 | 1.00x |
+| 2 | `Mutex` | 45.9 | 5.5 | 1.07x |
+| 4 | `Spinlock` | 14.2 | 3.0 | 1.46x |
+| 4 | `McsSpinlock` | 16.5 | 1.0 | 1.00x |
+| 4 | `Mutex` | 37.0 | 5.1 | 1.18x |
+| 8 | `Spinlock` | 8.29 | 2.2 | 4.86x |
+| 8 | `McsSpinlock` | 15.1 | 1.0 | 1.00x |
+| 8 | `Mutex` | 26.8 | 4.8 | 1.28x |
+| 12 | `Spinlock` | 4.63 | 1.2 | 2.01x |
+| 12 | `McsSpinlock` | 9.63 | 1.0 | 1.00x |
+| 12 | `Mutex` | 24.7 | 5.0 | 1.04x |
 
 `batch` is acquisitions per handoff. At 12 threads `Mutex` gives the
 lock straight back to the thread that just released it four times out
 of five: it is *barging*, and each acquisition it grants that way is
 one that costs no cache-line transfer at all, because the line is
-already Exclusive on that core. The spinlock at 1.3 pays a genuine
-cross-core transfer nearly every time. `Mutex` is not completing four
+already Exclusive on that core. `Spinlock` at 1.2 pays a genuine
+cross-core transfer nearly every time. `Mutex` is not completing five
 times as many handoffs per second — it is completing about the same
 number of handoffs and rather more acquisitions per handoff.
 
@@ -225,38 +269,77 @@ there: the throughput number and the batch factor rise together, and
 what is being spent to buy them is somebody's acquisition latency.
 Read the two tables together or neither.
 
+`McsSpinlock` is the column that makes the point, because it does not
+approximate fairness — it is 1.0 batch and 1.00x spread at every
+thread count, which is not a good result so much as the algorithm's
+specification showing up in a measurement. Every acquisition changes
+hands, and over half a second no thread got more than 0.2% more of
+the lock than any other. Compare the 8-thread `Spinlock` row, where
+the busiest thread got 4.9x the acquisitions of the idlest: that is
+what "the hardware picks the winner" looks like when the winner has a
+topological advantage, and it is invisible in a throughput number.
+
+What is worth dwelling on is that the fairness is not being bought
+here. `McsSpinlock` is *also* the faster of the two spinlocks from
+four threads up, and at 12 threads it is a little over twice
+`Spinlock`'s throughput. The usual expectation with a FIFO lock is a
+trade — pay some throughput, get determinism — and at two threads that
+is exactly what happens. Past four it does not, because the cost the
+queue removes (N-1 wasted CAS attempts and an N-way invalidation per
+release) grows with N while the cost it adds does not.
+
 The `contended` sweep also flatters the effect, because it is
 saturated by construction. With no work between releasing the lock and
 asking for it again, every thread is at all times either holding or
 waiting, the workload is 100% serial, and no lock can scale: what is
 left to measure is the cost of one handoff under a 12-deep queue.
 `work_ratio` adds the missing axis, at 12 threads, one `spin_loop()`
-costing about 15.5 ns on this machine:
+costing about 15.4 ns on this machine:
 
-| Non-critical work | `Spinlock` | `std::sync::Mutex` |
-| --- | --- | --- |
-| none | 4.78 Melem/s | 20.2 Melem/s |
-| 4 pauses (~62 ns) | 4.63 Melem/s | 7.76 Melem/s |
-| 16 pauses (~250 ns) | 4.04 Melem/s | 8.29 Melem/s |
-| 64 pauses (~1.0 µs) | 7.34 Melem/s | 8.36 Melem/s |
-| 256 pauses (~4.0 µs) | 2.00 Melem/s | 2.12 Melem/s |
+| Non-critical work | `Spinlock` | `McsSpinlock` | `std::sync::Mutex` |
+| --- | --- | --- | --- |
+| none | 4.75 Melem/s | 10.4 Melem/s | 21.3 Melem/s |
+| 4 pauses (~62 ns) | 4.65 Melem/s | 11.4 Melem/s | 8.26 Melem/s |
+| 16 pauses (~250 ns) | 4.33 Melem/s | 11.6 Melem/s | 8.57 Melem/s |
+| 64 pauses (~990 ns) | 8.91 Melem/s | 8.58 Melem/s | 9.26 Melem/s |
+| 256 pauses (~3.9 µs) | 2.28 Melem/s | 2.02 Melem/s | 2.30 Melem/s |
 
-Most of the 4x is gone by the time each thread does 62 ns of work
-outside the lock, and by ~4 µs the two are within noise of each other
-and both are falling — falling because the lock has stopped being the
-constraint and the work has become it. The sweep stops there for that
-reason: further right both columns are just `threads / non-critical
-work`, which measures the pause instruction and not a lock. The threshold is roughly
-`threads × handoff_cost`, which is where the queue starts draining
-faster than it fills; on this machine that is around 12 × 200 ns.
+Most of `Mutex`'s 4.5x over `Spinlock` is gone by the time each thread
+does 62 ns of work outside the lock, and by ~4 µs all three are within
+noise of each other and all three are falling — falling because the
+lock has stopped being the constraint and the work has become it. The
+sweep stops there for that reason: further right every column is just
+`threads / non-critical work`, which measures the pause instruction
+and not a lock. The threshold is roughly `threads × handoff_cost`,
+which is where the queue starts draining faster than it fills; on this
+machine that is around 12 × 200 ns.
 
-So the honest summary is narrower than the headline. The spinlock's
-win is the uncontended acquire, and it holds it. Its loss is confined
-to the saturated case, and about that case the interesting fact is
-that neither lock scales there — one of them is merely less fair about
-not scaling. What `Spinlock` genuinely lacks is any mechanism to
-degrade gracefully once saturated, and both the parking and the
-barging are such a mechanism.
+The `McsSpinlock` column is the one that changes the conclusion. Its
+worst showing is at zero non-critical work — the saturated case, which
+is the only case the other tables measure — and the first step off
+that point, 60 ns of real work per thread, is already enough to put it
+ahead of `Mutex` and keep it there until the lock stops mattering at
+all. At 16 pauses it is 1.35x
+`Mutex` and 2.7x `Spinlock`, and it is doing that while remaining
+strictly FIFO. For a 12-thread workload that does any work outside its
+critical sections, this is the row to read.
+
+So the honest summary is narrower than the headline. `Spinlock`'s win
+is the uncontended acquire, and it holds it. Its loss is confined to
+the saturated case, and about that case the interesting fact is that
+no lock here scales — some are merely less fair about not scaling.
+What `Spinlock` genuinely lacks is any mechanism to degrade gracefully
+once saturated, and the parking, the barging and the queue are each
+such a mechanism.
+
+`McsSpinlock` gives up the thing `Spinlock` is actually good at — it
+is 1.6x slower uncontended, and slower still at two threads — to buy
+determinism it then turns out not to have to pay for, since from four
+threads up it is faster as well as fairer. The case against it is the
+one the tests already ran into: strict FIFO has no answer to a
+descheduled queue head, so it needs the threads to fit on the cores.
+Within that constraint it is the better spinlock; outside it, it is
+the worse one, and the boundary is sharp rather than gradual.
 
 The contended sweeps stop at the machine's parallelism on purpose.
 Oversubscribing a spinlock is not merely a slow case, it is a
@@ -271,6 +354,18 @@ criterion `contended` figures for the same thread count. Its critical
 section is doing a little more — a comparison and two increments of
 the bookkeeping — and that is the price of being able to see the
 handoffs at all.
+
+`McsSpinlock` at 12 threads is the exception, and it reports *higher*
+there (9.63 against 6.65). Neither number is wrong; the criterion one
+is unstable. That cell's samples have a standard deviation larger than
+its own estimate, and its median works out to 10.9 Melem/s against a
+mean of 4.33 — a heavy right tail, which is exactly the shape a convoy
+makes, one descheduled queue head stalling every thread behind it for
+a scheduler quantum. The fairness target averages over a fixed 500 ms
+window and absorbs those stalls instead of sampling around them, so it
+is the more trustworthy figure for this lock at full occupancy. Treat
+the 12-thread MCS throughput as approximate and the shape of the
+fairness columns as the result.
 
 `[profile.bench]` keeps debug symbols on, so `perf record --call-graph
 dwarf -- cargo bench -- --profile-time 5` will attribute samples
@@ -291,8 +386,9 @@ would bake the *build* machine's geometry into the artifact, which is
 wrong as soon as you cross-compile.
 
 So the value is chosen per target architecture (128 bytes on x86_64
-and aarch64, 256 on s390x, 32 on arm/mips, 64 elsewhere) and exposed
-as `spinlock::CACHE_LINE_ALIGN`. x86_64 uses 128 despite having
+and aarch64, 256 on s390x, 32 on arm/mips, 64 elsewhere). It lives in
+[`src/cache.rs`](src/cache.rs), shared by every lock in the crate, and
+is re-exported as `spinlock::CACHE_LINE_ALIGN`. x86_64 uses 128 despite having
 64-byte lines because Intel's L2 prefetcher fetches them in aligned
 128-byte pairs. The runtime value is then used to *check* that choice:
 `alignment_covers_the_platform_cache_line` reads
