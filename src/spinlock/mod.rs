@@ -1,4 +1,30 @@
 //! A spinlock: mutual exclusion by busy-waiting rather than parking.
+//!
+//! # Contention and fairness
+//!
+//! Every waiter spins on the same flag, so a release writes a line
+//! that all N of them hold Shared: all N copies are invalidated, all
+//! N re-read it, all N attempt the CAS, and N-1 lose and go round
+//! again. A handoff costs more the more waiters there are.
+//!
+//! The same mechanism decides *who* wins, and not in arrival order.
+//! The releasing store leaves the line Modified in that core's own
+//! cache, so a thread that unlocks and immediately asks again can
+//! take the CAS with no coherence traffic at all, while every other
+//! waiter is still fetching the line. Re-acquisition by the previous
+//! holder is the cheapest outcome available and therefore the
+//! likeliest one -- the lock barges, and the shorter the gap between
+//! release and re-acquire the more it does so. Among the remaining
+//! waiters the same logic sorts by distance: the line goes to
+//! whichever core the fabric reaches first, which is a property of
+//! the topology rather than of who asked first, so a thread can lose
+//! repeatedly.
+//!
+//! Neither effect shows up in a throughput number -- an acquisition
+//! that skipped the transfer is a fast acquisition -- which is why
+//! `benches/fairness.rs` measures it separately, and what
+//! [`McsSpinlock`](crate::mcs_spinlock::McsSpinlock) removes by
+//! giving each waiter a flag of its own.
 
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
