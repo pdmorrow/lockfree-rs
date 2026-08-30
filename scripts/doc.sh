@@ -19,6 +19,13 @@
 #   scripts/doc.sh --deps           # document the dependencies too
 #   scripts/doc.sh --strict         # fail on any rustdoc warning
 #
+# --open defers to `cargo doc --open`, which tries $BROWSER before it
+# tries xdg-open. A $BROWSER naming a browser that is not installed is
+# a quiet failure rather than a loud one: cargo warns and still exits
+# 0, so no window appears and nothing downstream notices. Unset it to
+# fall back to the xdg default. The path is printed either way, so the
+# browser can be skipped entirely.
+#
 # Anything after `--` is passed on to `cargo doc`.
 
 set -euo pipefail
@@ -36,7 +43,7 @@ while [[ $# -gt 0 ]]; do
         --deps) NO_DEPS=0; shift ;;
         --strict) STRICT=1; shift ;;
         --) shift; CARGO_ARGS=("$@"); break ;;
-        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -71,5 +78,15 @@ if [[ $OPEN -eq 1 ]]; then
     # `cargo doc --open` rather than xdg-open: it already knows how to
     # find a browser on each platform, and re-running it here is free
     # because the build above is up to date.
+    #
+    # It consults $BROWSER first and only then xdg-open, and if
+    # $BROWSER names something that is not installed it warns and
+    # exits 0 -- so warn about the warning, which is otherwise easy to
+    # miss scrolling past a build log.
+    if [[ -n "${BROWSER:-}" ]] && ! command -v "${BROWSER%% *}" >/dev/null 2>&1; then
+        echo >&2 "note: \$BROWSER is set to '${BROWSER}', which is not on PATH."
+        echo >&2 "      cargo will warn and exit 0 without opening anything."
+        echo >&2 "      unset BROWSER to fall back to the xdg default."
+    fi
     cargo doc "${ARGS[@]}" "${CARGO_ARGS[@]}" --open
 fi

@@ -65,6 +65,38 @@ therefore silences that one lint in its default mode — including under
 `--strict` — and leaves it on under `--public`, where it is telling
 the truth.
 
+### If `--open` does nothing
+
+`--open` defers to `cargo doc --open`, which consults `$BROWSER`
+before it falls back to `xdg-open`. So a `$BROWSER` left pointing at a
+browser that is no longer installed is a *quiet* failure: cargo prints
+
+```
+warning: Couldn't open docs with firefox: No such file or directory (os error 2)
+```
+
+and then exits 0. No window appears, nothing downstream notices, and
+the warning is easy to scroll past at the end of a build log. The
+script now checks for this and says so before handing over, but the
+fix is in the environment rather than here — either point the variable
+at something real or let xdg decide:
+
+```sh
+export BROWSER=brave-browser   # whatever you actually run
+unset BROWSER                  # ... or defer to the xdg default
+```
+
+None of which is needed to read the docs. The path is printed on every
+run, so the browser can be skipped:
+
+```sh
+xdg-open target/doc/lockfree_rs/index.html
+python3 -m http.server -d target/doc 8000   # http://localhost:8000/lockfree_rs/
+```
+
+Prefer the second over SSH: a `file://` URL does not survive a port
+forward, and a served directory does.
+
 ## Test
 
 ```sh
