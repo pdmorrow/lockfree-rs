@@ -415,9 +415,150 @@ is the more trustworthy figure for this lock at full occupancy. Treat
 the 12-thread MCS throughput as approximate and the shape of the
 fairness columns as the result.
 
-`[profile.bench]` keeps debug symbols on, so `perf record --call-graph
-dwarf -- cargo bench -- --profile-time 5` will attribute samples
-properly.
+### Hardware counters
+
+Everything above is a stopwatch, and a stopwatch cannot say *why* the
+queued lock overtakes the barging one at four threads. The two execute
+a comparable number of instructions and differ almost entirely in what
+they ask the cache coherence protocol to do — which is invisible to
+every timer and perfectly visible to the CPU's performance monitoring
+unit.
+
+```sh
+scripts/perf.sh              # the thread sweep, under perf stat
+scripts/perf.sh padding      # what src/cache.rs buys, measured
+scripts/perf.sh all          # both, into one report
+scripts/perf.sh events       # which counters it picked, and why
+```
+
+Each writes `target/perf/counters.csv` and an HTML report with the
+charts. It needs `perf` on `PATH` and
+`kernel.perf_event_paranoid` at 1 or lower; the script says so if not.
+It never needs root — everything it does is per-process counting on a
+process `perf` itself started.
+
+It does *not* profile `cargo bench`. Pointing a counter at the
+criterion targets measures three locks, a thread sweep, a calibration
+loop and criterion's own sampling machinery in one undifferentiated
+number. [`benches/perf.rs`](benches/perf.rs) exists for this instead:
+one lock, one thread count, one process, and it drives `perf`'s control
+FIFO itself so the counters are armed only for the critical-section
+loop — not the process start, not the thread spawn, not the barrier.
+
+The headline counter is "a load was satisfied by a cache line held in
+another core's cache". There is no portable name for it, so the script
+probes a per-vendor candidate list (`ls_dmnd_fills_from_sys.int_cache`
+on AMD, `mem_load_l3_hit_retired.xsnp_*` on Intel) and falls back to
+`cache-misses` with a warning — a generic miss cannot tell a line
+arriving from DRAM from a line arriving from the core next door, and
+only the second one is what a contended lock does.
+
+On a 12-thread Zen 3 laptop, per acquisition:
+
+| threads | `Spinlock` | `McsSpinlock` |
+| --- | --- | --- |
+| 2 | 2.15 | 5.53 |
+| 4 | 4.35 | 6.21 |
+| 8 | 6.11 | 5.67 |
+| 12 | 8.46 | 5.61 |
+
+(These move a few percent between runs. The shape does not.)
+
+That is the whole trade, in one column each. Every waiter on a
+`Spinlock` spins on the same word, so a release invalidates all of
+them at once and the cost of a handoff grows with the number of
+threads. `McsSpinlock` gives each waiter a line nobody else writes;
+its constant is higher — it touches the tail pointer, its
+predecessor's node and its own flag — but it *is* a constant. The two
+curves cross between two and four threads, which is where the timings
+said the crossover was.
+
+The `padding` sweep is the control experiment for
+[`src/cache.rs`](src/cache.rs). Every thread gets a lock of its own and
+never waits for anybody, so the program contains no contention at all;
+the same code at three alignments then costs, at 12 threads:
+
+| variant | lines from another core / acq | cycles / acq |
+| --- | --- | --- |
+| unpadded | 1.00 | 287 |
+| `align(64)` | 0.00 | 15 |
+| `align(128)` | 0.00 | 15 |
+
+Twenty times the cycles for contention that exists nowhere in the
+source. The 64 and 128 columns agreeing is the AMD-specific half of
+the story — there is no adjacent-line prefetcher here to defeat, so 64
+is already enough and the extra 64 is insurance against the Intel case
+that `src/cache.rs` describes.
+
+Two more modes go past counting to attribution:
+
+```sh
+scripts/perf.sh record --locks mcs --threads 12   # where the cycles went
+scripts/perf.sh c2c    --locks packed             # which line, which offset
+```
+
+Both are more conditional than the counting above, and worth being
+plain about.
+
+`record` is the one that pays off, because a spinlock is small enough
+to read as instructions. The flat profile is useless — at this
+optimisation level `bump`, `lock` and the atomics all inline into the
+thread closure, so symbol-level attribution has one symbol at 99% and
+nothing to say. `perf annotate` has the whole loop in one basic block,
+and the two algorithms come out as two short lists. `Spinlock`, at 8
+threads:
+
+```
+    3.19 :   26352:  movzbl (%rdx),%eax
+   56.45 :   26355:  test   %al,%al
+    0.90 :   2635b:  lock cmpxchg %dil,(%rdx)
+   35.92 :   26360:  jne    26352
+    1.83 :   26369:  movb   $0x0,(%rdx)
+```
+
+`McsSpinlock`, same run:
+
+```
+   15.81 :   26212:  movzbl (%r12),%eax
+   77.77 :   26217:  test   %al,%al
+    1.03 :   26219:  jne    26210
+    3.03 :   26222:  mov    0x80(%r12),%rax
+    0.00 :   26285:  lock cmpxchg %rcx,0x0(%rbp)
+```
+
+`Spinlock` splits its cycles two ways: 56% on the load of the one
+shared flag, and 36% on the branch that retries a failed
+`lock cmpxchg` — waiting, and losing races. `McsSpinlock` has no retry
+branch worth the name, because there is no race to lose: 78% sits on a
+single load of the flag in the thread's own queue node, and its one
+locked instruction rounds to zero because the release-path CAS only
+fires when the queue is empty, which under contention it never is.
+(Sampling skid puts the weight on the `test` after each load rather
+than on the load itself — the `test` is where the pipeline waits for
+the line to arrive.) The `0x80(%r12)` in the MCS listing is the node's
+`next` pointer at a 128-byte offset: the padding, visible in the
+disassembly.
+
+This needs a `perf` that matches the running kernel. Older distro
+builds segfault in `annotate` and cannot demangle Rust's v0 symbol
+names; the script detects both and degrades to the call graph, and
+suggests `cargo install rustfilt` only when the names actually came
+out mangled.
+
+`c2c` is the tool built for exactly this question: it samples memory
+accesses with their data addresses and reports which *cache lines*
+bounced between cores and which offsets within them did it — two
+offsets in one line is false sharing, one offset is genuine contention
+on the same word. Whether it works is a hardware question. It needs the
+sampled data source to carry coherence state, which Intel's PEBS
+load-latency does and AMD's IBS does only on newer parts; on Zen 3 it
+runs, classifies every sample as "unable to parse data source", and
+reports "0 shared cache lines" — which reads exactly like a clean
+result, in a workload the counters show doing one cache-to-cache
+transfer per acquisition. Upgrading perf does not help; it is the
+hardware. The script checks for that case and says so rather than
+letting it pass. Nothing in `stat` or `padding` depends on any of
+this.
 
 ## Cache line assumptions
 
@@ -453,5 +594,6 @@ cargo test &&
 scripts/doc.sh --strict &&
 scripts/coverage.sh &&
 scripts/miri.sh --seeds 8 &&
-cargo bench
+cargo bench &&
+scripts/perf.sh all
 ```

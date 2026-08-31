@@ -18,6 +18,13 @@ harness = false
 name = "fairness"
 harness = false
 
+# Not a criterion target either: one lock, one configuration, one
+# process, so a hardware counter attached to it measures that and
+# nothing else. Driven by scripts/perf.sh.
+[[bench]]
+name = "perf"
+harness = false
+
 # Benchmarks are only meaningful with optimisations on; `cargo bench`
 # uses this profile.
 [profile.bench]
