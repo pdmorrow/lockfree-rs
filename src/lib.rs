@@ -1,16 +1,5 @@
 //! Concurrency primitives written from scratch.
 //!
-//! The point of this crate is both the API, which is deliberately the
-//! same shape as [`std::sync::Mutex`]'s, and also the reasoning behind the
-//! implementation: why a flag is padded to 128 bytes on x86_64, why a
-//! queued lock cannot cheaply support a timeout, why the fair lock is
-//! also the faster one past four threads. That reasoning lives in the
-//! module documentation, so this crate is meant to be read rendered:
-//!
-//! ```sh
-//! scripts/doc.sh --open
-//! ```
-//!
 //! # The locks
 //!
 //! | Type | Waiters spin on | Order |
