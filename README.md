@@ -2,8 +2,7 @@
 
 Non-sleeping concurrency primitives, written from scratch. A thread
 that cannot take one of these locks stays on its core and spins; it
-never parks and never enters the kernel. That is the right trade only
-when critical sections are short and threads do not outnumber cores.
+never voluntarily parks and never enters the kernel.
 
 | Type | Summary |
 | --- | --- |
@@ -76,7 +75,7 @@ throughput number cannot show.
 ## Hardware counters
 
 `scripts/perf.sh` measures what the locks ask of the cache coherence
-protocol, which is what separates them and what no timer can see. It
+protocol, which is what separates them generally. It
 drives [`benches/perf.rs`](benches/perf.rs) — one lock, one thread
 count, one process — not the criterion targets.
 
